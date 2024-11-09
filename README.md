@@ -22,3 +22,12 @@
      ```bash
      pip install -r requirements.txt
      ```
+4. **Make a new Mysql Database**:
+     Make a new database called "eclass"
+
+5. **Run the app**:
+   ```bash
+     python main.py
+   ```
+
+Access the api on [localhost:8000/docs)](http://localhost:8000/docs)
