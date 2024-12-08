@@ -1,86 +1,77 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Table, Enum
+from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Table, Enum, Text
 from sqlalchemy.orm import relationship
 from database import Base
 import enum
+from pydantic import BaseModel
 
-# Association Tables
 student_subject = Table(
-    "student_subject",
+    'student_subject',
     Base.metadata,
-    Column("student_id", Integer, ForeignKey("students.id")),
-    Column("subject_id", Integer, ForeignKey("subjects.id")),
+    Column('student_id', Integer, ForeignKey('users.id')),
+    Column('subject_id', Integer, ForeignKey('subjects.id'))
 )
 
-
-class SubmissionStatus(str, enum.Enum):
-    INCOMPLETE = "incomplete"
-    COMPLETE = "complete"
-    LATE = "late"
-
-
-class Teacher(Base):
-    __tablename__ = "teachers"
-
+class User(Base):
+    __tablename__ = 'users'
+    
     id = Column(Integer, primary_key=True, index=True)
+    email = Column(String(100), unique=True, index=True)
+    password = Column(String(100))
     firstname = Column(String(50), index=True)
     lastname = Column(String(50), index=True)
-    email = Column(String(100), unique=True, index=True)
-    hashed_password = Column(String(100))
-    subjects = relationship("Subject", back_populates="teacher")
+    role = Column(String(50), index=True)
 
+    created_subjects = relationship('Subject', back_populates='creator')
 
-class Student(Base):
-    __tablename__ = "students"
-
-    id = Column(Integer, primary_key=True, index=True)
-    firstname = Column(String(50), index=True)
-    lastname = Column(String(50), index=True)
-    email = Column(String(100), unique=True, index=True)
-    hashed_password = Column(String(100))
-    subjects = relationship(
-        "Subject", secondary=student_subject, back_populates="students"
+    enrolled_subjects = relationship(
+        'Subject',
+        secondary=student_subject,
+        back_populates='students'
     )
-    submissions = relationship("HomeworkSubmission", back_populates="student")
 
+    submissions = relationship("Submission", back_populates="student")
 
 class Subject(Base):
-    __tablename__ = "subjects"
-
+    __tablename__ = 'subjects'
+    
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), index=True)
-    detail = Column(String(500))
-    teacher_id = Column(Integer, ForeignKey("teachers.id"))
-    teacher = relationship("Teacher", back_populates="subjects")
+    code = Column(String(30), unique=True, index=True)
+    creator_id = Column(Integer, ForeignKey('users.id'))
+
+    creator = relationship('User', back_populates='created_subjects')
+
     students = relationship(
-        "Student", secondary=student_subject, back_populates="subjects"
+        'User',
+        secondary=student_subject,
+        back_populates='enrolled_subjects'
     )
-    homeworks = relationship("Homework", back_populates="subject")
 
+    assessments = relationship("Assessment", back_populates="subject")
 
-class Homework(Base):
-    __tablename__ = "homeworks"
+class Assessment(Base):
+    __tablename__ = "assessments"
 
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), index=True)
-    instructions = Column(String(1000))
-    due_date = Column(String(50))
-    max_score = Column(Integer, nullable=False)
+    description = Column(Text)
+    over = Column(Integer, nullable=True)
+    feedback = Column(Text, nullable=True)
+    attachment = Column(String(100), nullable=True)
     subject_id = Column(Integer, ForeignKey("subjects.id"))
-    subject = relationship("Subject", back_populates="homeworks")
-    submissions = relationship("HomeworkSubmission", back_populates="homework")
+    
+    subject = relationship("Subject", back_populates="assessments")
+    submissions = relationship("Submission", back_populates="assessments")
 
-
-class HomeworkSubmission(Base):
-    __tablename__ = "homework_submissions"
+class Submission(Base):
+    __tablename__ = "submissions"
 
     id = Column(Integer, primary_key=True, index=True)
-    homework_id = Column(Integer, ForeignKey("homeworks.id"))
-    student_id = Column(Integer, ForeignKey("students.id"))
-    submission_date = Column(String(50))
-    file_path = Column(String(255))
-    grade = Column(Integer, nullable=True)
-    feedback = Column(String(500), nullable=True)
-    status = Column(String(20), nullable=False, default=SubmissionStatus.INCOMPLETE)
+    score = Column(Integer, nullable=True)
+    feedback = Column(Text, nullable=True)
+    file_path = Column(String(100), nullable=True)
+    student_id = Column(Integer, ForeignKey("users.id"))
+    assessment_id = Column(Integer, ForeignKey('assessments.id'))
 
-    homework = relationship("Homework", back_populates="submissions")
-    student = relationship("Student", back_populates="submissions")
+    student = relationship("User", back_populates="submissions")
+    assessments = relationship("Assessment", back_populates="submissions")

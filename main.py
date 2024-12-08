@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query
+from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Query, UploadFile, Body, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
@@ -10,643 +10,585 @@ from uuid import uuid4
 from sqlalchemy import desc
 from typing import Dict, List
 from datetime import datetime
-
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
 from database import get_db, engine, Base
 from models import (
-    Teacher,
-    Student,
+    User,
     Subject,
-    Homework,
-    HomeworkSubmission,
-    SubmissionStatus,
 )
 import schemas
-from schemas import SubjectDetailResponse, GradeSubmissionRequest
+from enum import Enum
+import models, schemas, auth
+from auth import get_current_user
+from fastapi.middleware.cors import CORSMiddleware 
+import shutil
+import logging
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
+logging.basicConfig(level=logging.DEBUG)
 
-# Create tables
-Base.metadata.create_all(bind=engine)
+class UserType(str, Enum):
+    TEACHER = "teacher"
+    STUDENT = "student"
 
-# Password Hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 app = FastAPI(title="Appdev Classroom ", description="Google Classroom Clone")
 
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+UPLOAD_DIR = os.path.join(os.getcwd(), "files")
+app.mount("/files", StaticFiles(directory="files"), name="files")
+
+# Ensure the upload directory exists
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+# Password Hashing
+
+
+origins = [
+    "http://localhost:3000",  # Frontend React app (adjust if needed)
+    "http://localhost:8000",  # Backend API
+    "*",  # Allow all origins (not recommended for production)
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,  # Allows only these origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all HTTP methods
+    allow_headers=["*"],  # Allows all headers
+)
+
+SECRET_KEY = "your_secret_key"
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Helper Functions
 def get_password_hash(password: str):
     return pwd_context.hash(password)
 
+def authenticate_user(db: Session, email: str, password: str):
+    user = db.query(User).filter(User.email == email).first()
+    if user and auth.verify_password(password, user.password):  # Corrected line
+        return user
+    return None
 
-def check_submission_status(due_date: str, submission_date: datetime) -> str:
-    due_date = datetime.fromisoformat(due_date)
-    if submission_date > due_date:
-        return SubmissionStatus.LATE
-    return SubmissionStatus.COMPLETE
+@app.get("/files/{filename}")
+async def serve_file(filename: str):
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    logging.info(f"Attempting to serve file: {file_path}")
+    if os.path.exists(file_path):
+        return FileResponse(file_path)
+    else:
+        raise HTTPException(status_code=404, detail="File not found")
 
+@app.get("/users/details", response_model=schemas.UserOut)
+def get_me(current_user: User = Depends(get_current_user)):
+    return current_user
 
-# Teacher Endpoints
-@app.post("/teachers/", response_model=schemas.Teacher)
-def create_teacher(teacher: schemas.TeacherCreate, db: Session = Depends(get_db)):
-    db_teacher = Teacher(
-        firstname=teacher.firstname,
-        lastname=teacher.lastname,
-        email=teacher.email,
-        hashed_password=get_password_hash(teacher.password),
+@app.get("/user/{userID}")
+def get_user_name(userID: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.id == userID).first()
+
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    return {"firstName": user.firstname, "lastName": user.lastname}
+
+# Register user endpoint
+@app.post("/register", response_model=schemas.UserOut)
+def register_user(user: schemas.UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Email already registered")
+
+    hashed_password = auth.hash_password(user.password)
+    new_user = models.User(
+        email=user.email,
+        password=hashed_password,
+        firstname=user.firstname,
+        lastname=user.lastname,
+        role = user.role,
     )
-    db.add(db_teacher)
+    db.add(new_user)
     db.commit()
-    db.refresh(db_teacher)
-    return db_teacher
+    db.refresh(new_user)
+    return new_user
 
+# Login user endpoint
+@app.post("/login")
+def login_user(user: schemas.UserLogin, db: Session = Depends(get_db)):
+    db_user = db.query(models.User).filter(models.User.email == user.email).first()
+    if not db_user or not auth.verify_password(user.password, db_user.password):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-@app.get("/teachers/{teacher_id}/subjects", response_model=List[schemas.Subject])
-def get_teacher_subjects(teacher_id: int, db: Session = Depends(get_db)):
-    """Get all subjects taught by a specific teacher"""
-    teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-    return teacher.subjects
+    access_token = auth.create_access_token(data={"sub": db_user.email})
+    return {"access_token": access_token, "token_type": "bearer"}
 
-
-@app.get("/teachers/{teacher_id}/homeworks", response_model=List[schemas.Homework])
-def get_teacher_homeworks(
-    teacher_id: int, skip: int = 0, limit: int = 10, db: Session = Depends(get_db)
-):
-    """Get all homeworks created by a teacher across all subjects"""
-    teacher = db.query(Teacher).filter(Teacher.id == teacher_id).first()
-    if not teacher:
-        raise HTTPException(status_code=404, detail="Teacher not found")
-
-    homeworks = []
-    for subject in teacher.subjects:
-        homeworks.extend(subject.homeworks)
-
-    return homeworks[skip : skip + limit]
-
-
-# Student Endpoints
-@app.post("/students/", response_model=schemas.Student)
-def create_student(student: schemas.StudentCreate, db: Session = Depends(get_db)):
-    db_student = Student(
-        firstname=student.firstname,
-        lastname=student.lastname,
-        email=student.email,
-        hashed_password=get_password_hash(student.password),
-    )
-    db.add(db_student)
-    db.commit()
-    db.refresh(db_student)
-    return db_student
-
-
-@app.get("/students/{student_id}/subjects", response_model=List[schemas.Subject])
-def get_student_subjects(student_id: int, db: Session = Depends(get_db)):
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-    return student.subjects
-
-
-@app.get("/students/{student_id}/homeworks", response_model=List[schemas.Homework])
-def get_student_homeworks(
-    student_id: int,
-    status: Optional[str] = Query(None, enum=["pending", "submitted"]),
+@app.post("/subjects", response_model=schemas.SubjectCreate)
+def create_subject(
+    subject: schemas.SubjectCreate,
     db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user) 
 ):
-    """Get all homeworks assigned to a student with optional status filter"""
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-
-    homeworks = []
-    for subject in student.subjects:
-        for homework in subject.homeworks:
-            submission = (
-                db.query(HomeworkSubmission)
-                .filter(
-                    HomeworkSubmission.homework_id == homework.id,
-                    HomeworkSubmission.student_id == student_id,
-                )
-                .first()
-            )
-
-            if status == "pending" and not submission:
-                homeworks.append(homework)
-            elif status == "submitted" and submission:
-                homeworks.append(homework)
-            elif not status:
-                homeworks.append(homework)
-
-    return homeworks
-
-
-@app.get("/students/{student_id}/submissions", response_model=List[schemas.Submission])
-def get_student_submissions(student_id: int, db: Session = Depends(get_db)):
-    """Get all homework submissions for a student"""
-    submissions = (
-        db.query(HomeworkSubmission)
-        .filter(HomeworkSubmission.student_id == student_id)
-        .all()
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can create subjects")
+    
+    existing_subject = db.query(models.Subject).filter(models.Subject.code == subject.code).first()
+    if existing_subject:
+        raise HTTPException(status_code=400, detail="Subject code already exists")
+    
+    new_subject = models.Subject(
+        name=subject.name,
+        code=subject.code,
+        creator_id=current_user.id
     )
-    return submissions
-
-
-# Subject Endpoints
-@app.post("/subjects/", response_model=schemas.Subject)
-def create_subject(subject: schemas.SubjectCreate, db: Session = Depends(get_db)):
-    db_subject = Subject(**subject.dict())
-    db.add(db_subject)
+    db.add(new_subject)
     db.commit()
-    db.refresh(db_subject)
-    return db_subject
+    db.refresh(new_subject)
+    return new_subject
 
-
-@app.put("/subjects/{subject_id}", response_model=schemas.Subject)
-def update_subject(
-    subject_id: int, subject_update: schemas.SubjectBase, db: Session = Depends(get_db)
+@app.post("/subjects/{subject_id}/student/{student_id}", response_model=schemas.SubjectOut)
+def add_student_to_subject(
+    subject_id: int,
+    student_id: int,  # The student ID to add to the subject
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user)
 ):
-    """Update subject details"""
-    db_subject = db.query(Subject).filter(Subject.id == subject_id).first()
-    if not db_subject:
+    # Ensure only teachers can add students to subjects
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can add students to subjects")
+    
+    # Get the subject by ID
+    subject = db.query(models.Subject).filter(models.Subject.id == subject_id).first()
+    if not subject:
         raise HTTPException(status_code=404, detail="Subject not found")
+    
+    # Get the student by ID
+    student = db.query(models.User).filter(models.User.id == student_id, models.User.role == "Student").first()
+    if not student:
+        raise HTTPException(status_code=404, detail="Student not found or the user is not a student")
 
-    for key, value in subject_update.dict().items():
-        setattr(db_subject, key, value)
-
-    db.commit()
-    db.refresh(db_subject)
-    return db_subject
-
-
-@app.post("/subjects/{subject_id}/enroll/{student_id}")
-def enroll_student(subject_id: int, student_id: int, db: Session = Depends(get_db)):
-    subject = db.query(Subject).filter(Subject.id == subject_id).first()
-    student = db.query(Student).filter(Student.id == student_id).first()
-
-    if not subject or not student:
-        raise HTTPException(status_code=404, detail="Subject or student not found")
-
+    # Add the student to the subject if not already added
+    if student in subject.students:
+        raise HTTPException(status_code=400, detail="Student is already enrolled in this subject")
+    
+    # Add the student to the subject
     subject.students.append(student)
     db.commit()
+    db.refresh(subject)
 
-    return {"message": "Student enrolled successfully"}
+    return subject
 
+@app.post("/subjects/{subject_code}", response_model=schemas.SubjectOut)
+def join_subject_using_code(
+    subject_code: str,  # The subject code to join
+    student: models.User = Depends(get_current_user),  # Get the current student user
+    db: Session = Depends(get_db)
+):
+    # Ensure the user is a student
+    if student.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can join subjects")
+    
+    # Get the subject by code
+    subject = db.query(models.Subject).filter(models.Subject.code == subject_code).first()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
 
-@app.delete("/subjects/{subject_id}/unenroll/{student_id}")
-def unenroll_student(subject_id: int, student_id: int, db: Session = Depends(get_db)):
-    """Remove a student from a subject"""
-    subject = db.query(Subject).filter(Subject.id == subject_id).first()
-    student = db.query(Student).filter(Student.id == student_id).first()
-
-    if not subject or not student:
-        raise HTTPException(status_code=404, detail="Subject or student not found")
-
+    # Check if the student is already enrolled in the subject
     if student in subject.students:
-        subject.students.remove(student)
-        db.commit()
-        return {"message": "Student unenrolled successfully"}
+        raise HTTPException(status_code=400, detail="Student is already enrolled in this subject")
 
-    raise HTTPException(status_code=400, detail="Student not enrolled in this subject")
-
-
-@app.get("/subjects/{subject_id}/homeworks", response_model=List[schemas.Homework])
-def get_subject_homeworks(subject_id: int, db: Session = Depends(get_db)):
-    return db.query(Homework).filter(Homework.subject_id == subject_id).all()
-
-
-# Homework Endpoints
-@app.post("/homeworks/", response_model=schemas.Homework)
-def create_homework(homework: schemas.HomeworkCreate, db: Session = Depends(get_db)):
-    db_homework = Homework(**homework.dict())
-    db.add(db_homework)
+    # Add the student to the subject
+    subject.students.append(student)
     db.commit()
-    db.refresh(db_homework)
-    return db_homework
+    db.refresh(subject)
 
+    return subject
 
-@app.put("/homeworks/{homework_id}", response_model=schemas.Homework)
-def update_homework(
-    homework_id: int,
-    homework_update: schemas.HomeworkBase,
-    db: Session = Depends(get_db),
+@app.post("/subjects/{subject_id}/assessments", response_model=schemas.AssessmentOut)
+def create_assessment(
+    subject_id: str,
+    name: str = Form(...),
+    description: str = Form(...),
+    over: str = Form(...),
+    attachment: UploadFile = File(None),
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    """Update homework details"""
-    db_homework = db.query(Homework).filter(Homework.id == homework_id).first()
-    if not db_homework:
-        raise HTTPException(status_code=404, detail="Homework not found")
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can create assessments")
+    
+    subject = db.query(models.Subject).filter(models.Subject.id == subject_id).first()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
 
-    for key, value in homework_update.dict().items():
-        setattr(db_homework, key, value)
+    file_path = None
+    if attachment:
+        try:
+            # Define the directory to store files
+            upload_dir = "files/teachers"
+            os.makedirs(upload_dir, exist_ok=True)  # Ensure the directory exists
 
+            # Sanitize the file name (e.g., replace spaces with underscores)
+            sanitized_filename = f"{subject_id}_{attachment.filename}".replace(" ", "_")
+            file_path = os.path.join(upload_dir, sanitized_filename)
+
+            # Save the file
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(attachment.file, buffer)
+
+        except Exception as e:
+            # Handle any errors during the file upload process
+            raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
+
+    
+    # Create the assessment
+    new_assessment = models.Assessment(
+        name=name,
+        description=description,
+        over=over,
+        attachment=file_path,
+        subject_id=subject.id
+    )
+    
+    db.add(new_assessment)
     db.commit()
-    db.refresh(db_homework)
-    return db_homework
+    db.refresh(new_assessment)
+    
+    return new_assessment
 
-
-@app.delete("/homeworks/{homework_id}")
-def delete_homework(homework_id: int, db: Session = Depends(get_db)):
-    """Delete a homework assignment"""
-    homework = db.query(Homework).filter(Homework.id == homework_id).first()
-    if not homework:
-        raise HTTPException(status_code=404, detail="Homework not found")
-
-    db.delete(homework)
-    db.commit()
-    return {"message": "Homework deleted successfully"}
-
-
-# Submission Endpoints
-@app.post("/submissions/{homework_id}/{student_id}")
-async def submit_homework(
-    homework_id: int,
-    student_id: int,
+@app.post("/submission/{assessment_id}")
+def submit_assessment(
+    assessment_id: int,
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    homework = db.query(Homework).filter(Homework.id == homework_id).first()
-    if not homework:
-        raise HTTPException(status_code=404, detail="Homework not found")
+    # Ensure the current user is a student
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Only students can submit assessments")
 
-    os.makedirs("uploads", exist_ok=True)
+    # Check if the assessment exists
+    assessment = db.query(models.Assessment).filter(models.Assessment.id == assessment_id).first()
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
 
-    file_extension = os.path.splitext(file.filename)[1]
-    unique_filename = f"{uuid4()}{file_extension}"
-    file_path = f"uploads/{unique_filename}"
+    # Verify the student is enrolled in the subject
+    subject = db.query(models.Subject).filter(models.Subject.id == assessment.subject_id).first()
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found")
+    
+    if current_user.id not in [student.id for student in subject.students]:
+        raise HTTPException(status_code=403, detail="You are not enrolled in this subject")
 
-    with open(file_path, "wb") as buffer:
-        content = await file.read()
-        buffer.write(content)
+    # Handle file upload
+    file_path = None
+    try:
+        # Define the directory to store files
+        upload_dir = "files/students"
+        os.makedirs(upload_dir, exist_ok=True)  # Ensure the directory exists
 
-    submission_date = datetime.now()
-    status = check_submission_status(homework.due_date, submission_date)
+        # Sanitize the file name (e.g., replace spaces with underscores)
+        sanitized_filename = f"{assessment_id}_{current_user.id}_{file.filename}".replace(" ", "_")
+        file_path = os.path.join(upload_dir, sanitized_filename)
 
-    submission = HomeworkSubmission(
-        homework_id=homework_id,
-        student_id=student_id,
-        submission_date=submission_date.isoformat(),
-        file_path=file_path,
-        status=status,
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+    except Exception as e:
+        # Handle any errors during the file upload process
+        raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
+
+    # Check if the student has already submitted for this assessment
+    existing_submission = db.query(models.Submission).filter(
+        models.Submission.assessment_id == assessment_id,
+        models.Submission.student_id == current_user.id
+    ).first()
+
+    if existing_submission:
+        raise HTTPException(status_code=400, detail="You have already submitted this assessment")
+
+    # Create a new submission
+    new_submission = models.Submission(
+        student_id=current_user.id,
+        assessment_id=assessment_id,
+        file_path=file_path
     )
 
-    db.add(submission)
+    db.add(new_submission)
     db.commit()
-    db.refresh(submission)
+    db.refresh(new_submission)
+
+    return {"message": "Submission successful", "submission": new_submission}
+
+@app.get("/submission/view/{submission_id}")
+def view_submission(
+    submission_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Check if the user is a student or teacher
+    if current_user.role not in ["student", "teacher"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Retrieve the submission query
+    submission_query = db.query(models.Submission).filter(models.Submission.id == submission_id)
+
+    submission = submission_query.first()
+
+    # Check if submission exists
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
 
     return {
-        "message": "Homework submitted successfully",
-        "status": status,
-        "submission_date": submission_date.isoformat(),
+        "submission_id": submission.id,
+        "assessment_id": submission.assessment_id,
+        "file_path": submission.file_path,
+        "student": {
+                "id": current_user.id,
+                "name": f"{current_user.firstname} {current_user.lastname}",
+                "email": current_user.email
+            },
+        "score": submission.score,
+        "feedback": submission.feedback
     }
+
+@app.get("/submission/student/{assessment_id}")
+def student_submission(
+    assessment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Check if the user is a student or teacher
+    if current_user.role not in ["student", "teacher"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Retrieve the submission
+    submission_query = db.query(models.Submission).filter(models.Submission.assessment_id == assessment_id)
+
+    # If the user is a student, only fetch their submission
+    if current_user.role == "student":
+        submission_query = submission_query.filter(models.Submission.student_id == current_user.id)
+
+    submission = submission_query.first()
+
+    # Check if submission exists
+    if not submission:
+        raise HTTPException(status_code=404, detail="Submission not found")
+
+    # Response for student
+    return {
+        "submission_id": submission.id,
+        "assessment_id": submission.assessment_id,
+        "file_path": submission.file_path,
+        "student": {
+                "id": current_user.id,
+                "name": f"{current_user.firstname} {current_user.lastname}",
+                "email": current_user.email
+            },
+        "score": submission.score,
+        "feedback": submission.feedback
+    }
+
+@app.get("/submission/check/{assessment_id}")
+def student_submission_for_assessment(
+    assessment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Check if the user is a student or teacher
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Retrieve submissions for the student in the given assessment
+    submission_query = db.query(models.Submission).filter(
+        models.Submission.assessment_id == assessment_id,
+        models.Submission.student_id == current_user.id
+    )
+
+    submission = submission_query.first()
+
+    # Check if submission exists
+    if not submission:
+        return {"submission_exists": False}  # No submission found for the student in this assessment
+
+    # If submission exists, return submission details
+    return {
+        "submission_exists": True,
+        "submission_id": submission.id,
+        "file_path": submission.file_path,
+        "score": submission.score,
+        "feedback": submission.feedback
+    }
+
+@app.get("/submissions/view/{assessment_id}")
+def view_submissions(
+    assessment_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Check if the user is a student or teacher
+    if current_user.role not in ["student", "teacher"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Retrieve the assessment to ensure it exists
+    assessment = db.query(models.Assessment).filter(models.Assessment.id == assessment_id).first()
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+
+    # If the user is a student, only fetch their submission
+    if current_user.role == "student":
+        submission = (
+            db.query(models.Submission)
+            .filter(
+                models.Submission.assessment_id == assessment_id,
+                models.Submission.student_id == current_user.id,
+            )
+            .first()
+        )
+
+        # Check if submission exists
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+
+        # Response for student
+        return {
+            "submission_id": submission.id,
+            "assessment_id": submission.assessment_id,
+            "file_path": submission.file_path,
+            "score": submission.score,
+            "feedback": submission.feedback,
+        }
+
+    # If the user is a teacher, fetch all submissions for the assessment
+    if current_user.role == "teacher":
+        submissions = (
+            db.query(models.Submission)
+            .filter(models.Submission.assessment_id == assessment_id)
+            .all()
+        )
+
+        # If no submissions exist
+        if not submissions:
+            raise HTTPException(status_code=404, detail="No submissions found for this assessment")
+
+        # Format the response for teacher
+        result = []
+        for submission in submissions:
+            student = db.query(models.User).filter(models.User.id == submission.student_id).first()
+            result.append({
+                "submission_id": submission.id,
+                "student": {
+                    "id": student.id,
+                    "name": f"{student.firstname} {student.lastname}",
+                    "email": student.email,
+                },
+                "file_path": submission.file_path,
+                "score": submission.score,
+                "feedback": submission.feedback,
+            })
+
+        return {
+            "assessment_id": assessment_id,
+            "assessment_name": assessment.name,
+            "submissions": result,
+        }
 
 
 @app.put("/submissions/{submission_id}/grade")
 def grade_submission(
     submission_id: int,
-    grade_request: GradeSubmissionRequest,
-    db: Session = Depends(get_db),
+    grade_data: schemas.AssessmentFeedback,
+    teacher: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
-    submission = (
-        db.query(HomeworkSubmission)
-        .filter(HomeworkSubmission.id == submission_id)
-        .first()
-    )
+    # Verify the user's role
+    if teacher.role != "teacher":
+        raise HTTPException(status_code=403, detail="Only teachers can grade submissions")
+
+    # Fetch the submission
+    submission = db.query(models.Submission).filter(models.Submission.id == submission_id).first()
     if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    homework = db.query(Homework).filter(Homework.id == submission.homework_id).first()
-    if grade_request.grade > homework.max_score:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Grade cannot exceed maximum score of {homework.max_score}",
-        )
+    # Verify the teacher is the creator of the subject related to this submission's assessment
+    assessment = db.query(models.Assessment).filter(models.Assessment.id == submission.assessment_id).first()
+    if not assessment:
+        raise HTTPException(status_code=404, detail="Associated assessment not found")
 
-    submission.grade = grade_request.grade
-    submission.feedback = grade_request.feedback
-    submission.status = SubmissionStatus.COMPLETE
+    subject = db.query(models.Subject).filter(models.Subject.id == assessment.subject_id).first()
+    if not subject or subject.creator_id != teacher.id:
+        raise HTTPException(status_code=403, detail="You are not authorized to grade this submission")
+
+    # Update score and feedback for the submission
+    if grade_data.score is not None:
+        if not (0 <= grade_data.score <= 100):
+            raise HTTPException(status_code=400, detail="Score must be between 0 and 100")
+        submission.score = grade_data.score
+    if grade_data.feedback:
+        submission.feedback = grade_data.feedback
+
+    # Commit changes to the database
     db.commit()
+    db.refresh(submission)
 
     return {
         "message": "Submission graded successfully",
-        "grade": grade_request.grade,
-        "feedback": grade_request.feedback,
-    }
-
-
-@app.get("/homeworks/{homework_id}/submission-status")
-def get_homework_submission_status(homework_id: int, db: Session = Depends(get_db)):
-    """
-    Get submission status for all students enrolled in the subject for a specific homework
-    Returns detailed status including:
-    - Whether they've submitted
-    - If submitted, whether it was on time or late
-    - Their grade if graded
-    - Missing submissions
-    """
-    # Get the homework and associated subject
-    homework = db.query(Homework).filter(Homework.id == homework_id).first()
-    if not homework:
-        raise HTTPException(status_code=404, detail="Homework not found")
-
-    subject = homework.subject
-    due_date = datetime.fromisoformat(homework.due_date)
-
-    # Initialize response structure
-    submission_status = {
-        "homework_name": homework.name,
-        "due_date": homework.due_date,
-        "subject_name": subject.name,
-        "total_students": len(subject.students),
-        "submitted_count": 0,
-        "pending_count": 0,
-        "student_statuses": [],
-    }
-
-    # Check submission status for each enrolled student
-    for student in subject.students:
-        submission = (
-            db.query(HomeworkSubmission)
-            .filter(
-                HomeworkSubmission.homework_id == homework_id,
-                HomeworkSubmission.student_id == student.id,
-            )
-            .first()
-        )
-
-        student_status = {
-            "student_id": student.id,
-            "student_name": f"{student.firstname} {student.lastname}",
-            "submitted": False,
-            "submission_date": None,
-            "status": "Not Submitted",
-            "grade": None,
-            "feedback": None,
-            "days_overdue": None,
+        "submission": {
+            "id": submission.id,
+            "assessment_id": submission.assessment_id,
+            "student_id": submission.student_id,
+            "score": submission.score,
+            "feedback": submission.feedback
         }
-
-        if submission:
-            submission_status["submitted_count"] += 1
-            submission_date = datetime.fromisoformat(submission.submission_date)
-
-            student_status.update(
-                {
-                    "submitted": True,
-                    "submission_date": submission.submission_date,
-                    "status": submission.status,
-                    "grade": submission.grade,
-                    "feedback": submission.feedback,
-                }
-            )
-
-            # Calculate days overdue if submitted late
-            if submission_date > due_date:
-                days_overdue = (submission_date - due_date).days
-                student_status["days_overdue"] = days_overdue
-        else:
-            submission_status["pending_count"] += 1
-            # Calculate days overdue for non-submissions if past due date
-            if datetime.now() > due_date:
-                days_overdue = (datetime.now() - due_date).days
-                student_status["days_overdue"] = days_overdue
-
-        submission_status["student_statuses"].append(student_status)
-
-    # Add summary statistics
-    submission_status.update(
-        {
-            "submission_rate": f"{(submission_status['submitted_count'] / len(subject.students) * 100):.1f}%",
-            "graded_count": len(
-                [
-                    s
-                    for s in submission_status["student_statuses"]
-                    if s["grade"] is not None
-                ]
-            ),
-            "late_submissions": len(
-                [
-                    s
-                    for s in submission_status["student_statuses"]
-                    if s.get("status") == "late"
-                ]
-            ),
-            "on_time_submissions": len(
-                [
-                    s
-                    for s in submission_status["student_statuses"]
-                    if s.get("status") == "complete"
-                ]
-            ),
-        }
-    )
-
-    return submission_status
-
-
-@app.get("/subjects/{subject_id}/all-homework-status")
-def get_subject_homework_status(subject_id: int, db: Session = Depends(get_db)):
-    """
-    Get submission status for all homeworks in a subject
-    Provides an overview of submission rates and student performance
-    """
-    subject = db.query(Subject).filter(Subject.id == subject_id).first()
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
-
-    homework_status = {
-        "subject_name": subject.name,
-        "total_students": len(subject.students),
-        "total_homeworks": len(subject.homeworks),
-        "homeworks": [],
     }
 
-    for homework in subject.homeworks:
-        homework_data = {
-            "homework_id": homework.id,
-            "homework_name": homework.name,
-            "due_date": homework.due_date,
-            "max_score": homework.max_score,
-            "submission_summary": {
-                "total_submissions": 0,
-                "pending_submissions": len(subject.students),
-                "late_submissions": 0,
-                "on_time_submissions": 0,
-                "average_grade": 0,
-            },
-            "student_status": {},
-        }
+# Endpoint for teachers to get all subjects they created
+@app.get("/teacher/subjects", response_model=List[schemas.SubjectOut])
+def get_teacher_subjects(current_user: schemas.UserOut = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role != "teacher":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # Get all subjects created by the teacher
+    subjects = db.query(Subject).filter(Subject.creator_id == current_user.id).all()
+    return subjects
 
-        total_grade = 0
-        graded_count = 0
+# Endpoint for students to get only the subjects they are enrolled in
+@app.get("/student/subjects", response_model=List[schemas.SubjectOut])
+def get_student_subjects(current_user: schemas.UserOut = Depends(get_current_user), db: Session = Depends(get_db)):
+    if current_user.role != "student":
+        raise HTTPException(status_code=403, detail="Not authorized")
+    
+    # Get all subjects where the student is enrolled
+    subjects = db.query(Subject).join(Subject.students).filter(User.id == current_user.id).all()
+    return subjects
 
-        for student in subject.students:
-            submission = (
-                db.query(HomeworkSubmission)
-                .filter(
-                    HomeworkSubmission.homework_id == homework.id,
-                    HomeworkSubmission.student_id == student.id,
-                )
-                .first()
-            )
+@app.get("/assessments/{subject_id}", response_model=List[schemas.AssessmentOut])
+def get_assessments_by_subject(
+    subject_id: int,
+    db: Session = Depends(get_db),
+):
+    assessments = db.query(models.Assessment).filter(models.Assessment.subject_id == subject_id).all()
+    return assessments
 
-            student_status = {
-                "submitted": False,
-                "status": "Not Submitted",
-                "grade": None,
-            }
-
-            if submission:
-                homework_data["submission_summary"]["total_submissions"] += 1
-                homework_data["submission_summary"]["pending_submissions"] -= 1
-
-                student_status.update(
-                    {
-                        "submitted": True,
-                        "status": submission.status,
-                        "grade": submission.grade,
-                        "submission_date": submission.submission_date,
-                    }
-                )
-
-                if submission.status == "late":
-                    homework_data["submission_summary"]["late_submissions"] += 1
-                elif submission.status == "complete":
-                    homework_data["submission_summary"]["on_time_submissions"] += 1
-
-                if submission.grade is not None:
-                    total_grade += submission.grade
-                    graded_count += 1
-
-            homework_data["student_status"][student.id] = student_status
-
-        # Calculate average grade
-        if graded_count > 0:
-            homework_data["submission_summary"]["average_grade"] = round(
-                total_grade / graded_count, 2
-            )
-
-        homework_status["homeworks"].append(homework_data)
-
-    return homework_status
-
-
-# Analytics Endpoints
-@app.get("/subjects/{subject_id}/analytics")
-def get_subject_analytics(subject_id: int, db: Session = Depends(get_db)):
-    """Get analytics for a subject"""
-    subject = db.query(Subject).filter(Subject.id == subject_id).first()
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
-
-    total_students = len(subject.students)
-    total_homeworks = len(subject.homeworks)
-
-    submissions_stats = {
-        "total_submissions": 0,
-        "on_time_submissions": 0,
-        "late_submissions": 0,
-        "pending_submissions": 0,
-    }
-
-    for homework in subject.homeworks:
-        for submission in homework.submissions:
-            submissions_stats["total_submissions"] += 1
-            if submission.status == SubmissionStatus.COMPLETE:
-                submissions_stats["on_time_submissions"] += 1
-            elif submission.status == SubmissionStatus.LATE:
-                submissions_stats["late_submissions"] += 1
-            else:
-                submissions_stats["pending_submissions"] += 1
-
-    return {
-        "subject_name": subject.name,
-        "total_students": total_students,
-        "total_homeworks": total_homeworks,
-        "submissions_stats": submissions_stats,
-    }
-
-
-@app.get("/students/{student_id}/analytics")
-def get_student_analytics(student_id: int, db: Session = Depends(get_db)):
-    """Get analytics for a student"""
-    student = db.query(Student).filter(Student.id == student_id).first()
-    if not student:
-        raise HTTPException(status_code=404, detail="Student not found")
-
-    analytics = {
-        "total_subjects": len(student.subjects),
-        "total_submissions": len(student.submissions),
-        "submission_status": {"complete": 0, "late": 0, "incomplete": 0},
-        "average_grade": 0,
-        "grades_by_subject": {},
-    }
-
-    total_grade = 0
-    graded_submissions = 0
-
-    for submission in student.submissions:
-        analytics["submission_status"][submission.status] += 1
-
-        if submission.grade is not None:
-            total_grade += submission.grade
-            graded_submissions += 1
-
-            subject_name = submission.homework.subject.name
-            if subject_name not in analytics["grades_by_subject"]:
-                analytics["grades_by_subject"][subject_name] = {
-                    "total_grade": 0,
-                    "count": 0,
-                    "average": 0,
-                }
-
-            analytics["grades_by_subject"][subject_name][
-                "total_grade"
-            ] += submission.grade
-            analytics["grades_by_subject"][subject_name]["count"] += 1
-
-    if graded_submissions > 0:
-        analytics["average_grade"] = total_grade / graded_submissions
-
-        for subject in analytics["grades_by_subject"]:
-            subject_stats = analytics["grades_by_subject"][subject]
-            if subject_stats["count"] > 0:
-                subject_stats["average"] = (
-                    subject_stats["total_grade"] / subject_stats["count"]
-                )
-
-    return analytics
-
-
-@app.get("/subjects/{subject_id}/details", response_model=SubjectDetailResponse)
-def get_subject_details(subject_id: int, db: Session = Depends(get_db)):
-    """
-    Get comprehensive details of a subject including:
-    - Subject information
-    - Teacher information
-    - List of enrolled students
-    - Summary statistics
-    """
-    subject = db.query(Subject).filter(Subject.id == subject_id).first()
-    if not subject:
-        raise HTTPException(status_code=404, detail="Subject not found")
-
-    # Get the latest homework if any exists
-    latest_homework = None
-    if subject.homeworks:
-        latest_homework = max(subject.homeworks, key=lambda h: h.due_date)
-
-    response = {
-        "id": subject.id,
-        "name": subject.name,
-        "detail": subject.detail,
-        "teacher": subject.teacher,
-        "students": subject.students,
-        "total_students": len(subject.students),
-        "total_homeworks": len(subject.homeworks),
-        "latest_homework": latest_homework,
-    }
-
-    return response
+@app.get("/assessments/id/{assessment_id}", response_model=schemas.AssessmentOut)
+def get_assessment_by_id(
+    assessment_id: int,
+    db: Session = Depends(get_db),
+):
+    assessment = db.query(models.Assessment).filter(models.Assessment.id == assessment_id).first()
+    if assessment is None:
+        raise HTTPException(status_code=404, detail="Assessment not found")
+    return assessment
 
 
 if __name__ == "__main__":

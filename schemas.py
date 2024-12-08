@@ -2,138 +2,87 @@ from pydantic import BaseModel, EmailStr
 from typing import List, Optional
 from enum import Enum
 
-
-class SubmissionStatus(str, Enum):
-    INCOMPLETE = "incomplete"
-    COMPLETE = "complete"
-    LATE = "late"
-
-
-class TeacherBase(BaseModel):
-    firstname: str
-    lastname: str
-    email: EmailStr
-
-
-class TeacherCreate(TeacherBase):
+class UserLogin(BaseModel):
+    email: str
     password: str
 
-
-class Teacher(TeacherBase):
-    id: int
-
-    class Config:
-        orm_mode = True
-
-
-class StudentBase(BaseModel):
+class UserCreate(BaseModel):
+    email: EmailStr
+    password: str
     firstname: str
     lastname: str
+    role: str
+
+class UserOut(BaseModel):
+    id: int
     email: EmailStr
-
-
-class StudentCreate(StudentBase):
-    password: str
-
-
-class Student(StudentBase):
-    id: int
+    firstname: str
+    lastname: str
+    role: str
 
     class Config:
         orm_mode = True
 
+class UserOut(BaseModel):
+    id: int
+    email: str
+    firstname: str
+    lastname: str
+    role: str
 
-class SubjectBase(BaseModel):
+    class Config:
+        orm_mode = True
+
+class SubjectCreate(BaseModel):
     name: str
-    detail: str
+    code: str
 
-
-class SubjectCreate(SubjectBase):
-    teacher_id: int
-
-
-class Subject(SubjectBase):
+class SubjectOut(BaseModel):
     id: int
-    teacher_id: int
-
-    class Config:
-        orm_mode = True
-
-
-class HomeworkBase(BaseModel):
     name: str
-    instructions: str
-    due_date: str
-    max_score: int
-
-
-class HomeworkCreate(HomeworkBase):
-    subject_id: int
-
-
-class Homework(HomeworkBase):
-    id: int
-    subject_id: int
+    code: str
+    creator_id: int
+    students: List[UserOut] = []
 
     class Config:
         orm_mode = True
 
+class AssessmentCreate(BaseModel):
+    name: str
+    description: str
+    score: Optional[int]
+    attachment: Optional[str] = None
 
-class GradeSubmissionRequest(BaseModel):
-    grade: int
-    feedback: str
+    class Config:
+        orm_mode = True
 
-
-class SubmissionBase(BaseModel):
-    homework_id: int
-    student_id: int
-
-
-class SubmissionCreate(SubmissionBase):
-    pass
-
-
-class Submission(SubmissionBase):
-    id: int
-    submission_date: str
+class AssessmentSubmit(BaseModel):
     file_path: str
-    grade: Optional[int]
+
+    class Config:
+        orm_mode = True
+
+class AssessmentFeedback(BaseModel):
+    score: Optional[int]
     feedback: Optional[str]
-    status: SubmissionStatus
 
     class Config:
         orm_mode = True
 
-
-class StudentInfo(BaseModel):
-    id: int
-    firstname: str
-    lastname: str
-    email: EmailStr
-
-    class Config:
-        orm_mode = True
-
-
-class TeacherInfo(BaseModel):
-    id: int
-    firstname: str
-    lastname: str
-    email: EmailStr
-
-    class Config:
-        orm_mode = True
-
-
-class SubjectDetailResponse(BaseModel):
+class AssessmentOut(BaseModel):
     id: int
     name: str
-    detail: str
-    teacher: TeacherInfo
-    students: List[StudentInfo]
-    total_students: int
-    total_homeworks: int
-    latest_homework: Optional[HomeworkBase] = None
+    description: str
+    over: int
+    attachment: Optional[str]
+
+    class Config:
+        orm_mode = True
+
+class Submission(BaseModel):
+    score: Optional[int]
+    feedback: Optional[str]
+    file_path: Optional[str]
 
     class Config:
         orm_mode = True
